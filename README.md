@@ -5,5 +5,9 @@ AUTOSAR Classic Platform R21-11, meeting ISO 26262 functional safety
 (highest allocated ASIL-D via ASIL-B(D) decomposition + end-to-end
 protection).
 
-- `docs/TGW_Routing_Design.md` — full architecture and safety concept
+- `docs/TGW_Routing_Design.md` — architecture and safety concept
+- `docs/TGW_Code_Design.md` — detailed code design (module map, control flow)
 - `config/PduR_RoutingTable.arxml` — PduR routing table excerpt
+- `src/` — reference C implementation (PduR dispatcher, SafetyMgr,
+  SecOC gate, deadline monitor, E2E wrapper)
+- `test/` — host unit tests (`cd test && make run`)

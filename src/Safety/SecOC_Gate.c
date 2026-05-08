@@ -19,6 +19,7 @@
 
 #include "SecOC_Gate.h"
 #include "Dem.h"
+#include "IdsM.h"
 
 /* Provided by the SecOC module proper. */
 extern Std_ReturnType SecOC_VerifyAuthenticator(PduIdType id, const PduInfoType *info);
@@ -95,12 +96,29 @@ static uint16 ExtractCmdId(const PduInfoType *info)
 /*  Public                                                            */
 /* ------------------------------------------------------------------ */
 
+static void BuildCtx(IdsM_CtxDataType *c, const PduR_RouteEntryType *r,
+                     const PduInfoType *info)
+{
+    c->srcModule = (uint16)r->SrcModule;
+    c->srcPduId  = r->SrcPduId;
+    c->length    = (uint16)info->SduLength;
+    c->reserved  = 0u;
+    const uint16 n = (info->SduLength < 8u) ? (uint16)info->SduLength : 8u;
+    for (uint16 i = 0u; i < 8u; i++) {
+        c->payloadHead[i] = (i < n) ? info->SduDataPtr[i] : 0u;
+    }
+}
+
 Std_ReturnType SecOC_Gate_Check(const PduR_RouteEntryType *route,
                                 const PduInfoType         *info)
 {
+    IdsM_CtxDataType ctx;
+    BuildCtx(&ctx, route, info);
+
     /* SecOC verification is always required on a gated route. */
     if (SecOC_VerifyAuthenticator(route->SrcPduId, info) != E_OK) {
         Dem_ReportErrorStatus(DEM_EVT_SECOC_AUTH_FAIL, DEM_EVENT_STATUS_FAILED);
+        (void)IdsM_ReportSecurityEvent(IDSM_SEV_SECOC_AUTH_FAIL, &ctx);
         return E_NOT_OK;
     }
 
@@ -111,15 +129,18 @@ Std_ReturnType SecOC_Gate_Check(const PduR_RouteEntryType *route,
     /* PDUR_GATE_SECOC_RATELIMIT_ALLOWLIST: the harder off-board gate. */
     if (info->SduLength < 2u) {
         Dem_ReportErrorStatus(DEM_EVT_SECOC_NOT_ALLOW, DEM_EVENT_STATUS_FAILED);
+        (void)IdsM_ReportSecurityEvent(IDSM_SEV_SECOC_NOT_ALLOW, &ctx);
         return E_NOT_OK;
     }
     if (TokenBucket_Take(&Bucket_Telematics) == FALSE) {
         Dem_ReportErrorStatus(DEM_EVT_SECOC_RATELIMIT, DEM_EVENT_STATUS_FAILED);
+        (void)IdsM_ReportSecurityEvent(IDSM_SEV_SECOC_RATELIMIT, &ctx);
         return E_NOT_OK;
     }
     const uint16 cmd = ExtractCmdId(info);
     if (AllowList_Contains(cmd) == FALSE) {
         Dem_ReportErrorStatus(DEM_EVT_SECOC_NOT_ALLOW, DEM_EVENT_STATUS_FAILED);
+        (void)IdsM_ReportSecurityEvent(IDSM_SEV_SECOC_NOT_ALLOW, &ctx);
         return E_NOT_OK;
     }
     return E_OK;

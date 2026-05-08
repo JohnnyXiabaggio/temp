@@ -24,6 +24,8 @@
 #include "DeadlineMonitor.h"
 #include "SecOC_Gate.h"
 #include "Dem.h"
+#include "IdsM.h"
+#include "AnomalyDetector.h"
 
 /* External lower-layer transmit primitives. Real AUTOSAR uses
  * <Module>_Transmit; declared here to keep the file self-contained. */
@@ -79,6 +81,20 @@ PduR_DispatchOne(const PduR_DestPduType *dst, const PduInfoType *info)
 /* ------------------------------------------------------------------ */
 
 static void
+PduR_BuildIdsCtx(IdsM_CtxDataType *ctx, PduR_SrcModuleType m,
+                 PduIdType id, const PduInfoType *info)
+{
+    ctx->srcModule = (uint16)m;
+    ctx->srcPduId  = id;
+    ctx->length    = (info != NULL) ? (uint16)info->SduLength : 0u;
+    ctx->reserved  = 0u;
+    const uint16 n = (ctx->length < 8u) ? ctx->length : 8u;
+    for (uint16 i = 0u; i < 8u; i++) {
+        ctx->payloadHead[i] = (i < n) ? info->SduDataPtr[i] : 0u;
+    }
+}
+
+static void
 PduR_RouteCommon(PduR_SrcModuleType srcMod, PduIdType srcId, const PduInfoType *info)
 {
     /* Pre-conditions: the module must be initialised and the safety
@@ -93,10 +109,25 @@ PduR_RouteCommon(PduR_SrcModuleType srcMod, PduIdType srcId, const PduInfoType *
         return;
     }
 
+    /* IDPS prevention checks come *before* anything else: an isolated
+     * source or blocked route is dropped without any further
+     * processing, so an active attack cannot influence the dispatcher
+     * even if a downstream check has a bug. */
+    if (IdsM_IsSourceIsolated((uint16)srcMod) == TRUE) {
+        PduR_Stats.droppedNoRoute++;
+        return;
+    }
+    if (IdsM_IsRouteBlocked((uint16)srcId) == TRUE) {
+        PduR_Stats.droppedGate++;
+        return;
+    }
+
     const PduR_RouteEntryType *route = PduR_FindRoute(srcMod, srcId);
     if (route == NULL) {
         PduR_Stats.droppedNoRoute++;
         Dem_ReportErrorStatus(DEM_EVT_PDUR_NO_ROUTE, DEM_EVENT_STATUS_FAILED);
+        IdsM_CtxDataType ctx; PduR_BuildIdsCtx(&ctx, srcMod, srcId, info);
+        (void)IdsM_ReportSecurityEvent(IDSM_SEV_PDUR_NO_ROUTE, &ctx);
         return;
     }
 
@@ -104,6 +135,18 @@ PduR_RouteCommon(PduR_SrcModuleType srcMod, PduIdType srcId, const PduInfoType *
     if (info->SduLength > route->MaxPduLength) {
         PduR_Stats.droppedLength++;
         Dem_ReportErrorStatus(DEM_EVT_PDUR_LEN, DEM_EVENT_STATUS_FAILED);
+        IdsM_CtxDataType ctx; PduR_BuildIdsCtx(&ctx, srcMod, srcId, info);
+        (void)IdsM_ReportSecurityEvent(IDSM_SEV_PDUR_LEN, &ctx);
+        return;
+    }
+
+    /* Specification-based frequency anomaly detector. A repeat-storm
+     * (replay) or starvation pattern triggers BLOCK_ROUTE via policy
+     * so the very next call short-circuits at the IdsM check above. */
+    if (AnomalyDetector_Check((uint16)srcId) == TRUE) {
+        IdsM_CtxDataType ctx; PduR_BuildIdsCtx(&ctx, srcMod, srcId, info);
+        (void)IdsM_ReportSecurityEvent(IDSM_SEV_FREQ_ANOMALY, &ctx);
+        PduR_Stats.droppedGate++;
         return;
     }
 
@@ -111,7 +154,7 @@ PduR_RouteCommon(PduR_SrcModuleType srcMod, PduIdType srcId, const PduInfoType *
     if (route->IngressGate != PDUR_GATE_NONE) {
         if (SecOC_Gate_Check(route, info) != E_OK) {
             PduR_Stats.droppedGate++;
-            /* Dem already reported by the gate with the precise reason. */
+            /* Dem and IdsM already reported by the gate. */
             return;
         }
     }
@@ -157,6 +200,8 @@ FUNC(Std_ReturnType, PDUR_CODE) PduR_Init(void)
         SafetyMgr_EnterSafeState(SAFE_STATE_REASON_ROUTE_TABLE_CRC);
         return E_NOT_OK;
     }
+    (void)IdsM_Init();
+    (void)AnomalyDetector_Init();
     /* Memset-equivalent without <string.h>. */
     PduR_Stats.routedOk         = 0u;
     PduR_Stats.droppedNoRoute   = 0u;

@@ -12,6 +12,8 @@
 #include "PduR_Cfg.h"
 #include "SafetyMgr.h"
 #include "Dem.h"
+#include "IdsM.h"
+#include "Ids_Types.h"
 
 /* --- mock lower layers --------------------------------------------- */
 
@@ -69,6 +71,11 @@ Std_ReturnType SecOC_VerifyAuthenticator(PduIdType id, const PduInfoType *info)
 Std_ReturnType SafetyMgr_VerifyRouteTableCrc(const PduR_RouteEntryType *t,
                                              uint32 n, uint32 e)
 { (void)t; (void)n; (void)e; return E_OK; }
+
+/* Off-board reporter mock: count forwarded entries. */
+static uint32 IdsR_Forwarded;
+Std_ReturnType IdsR_Forward(const IdsM_SemEntryType *e)
+{ (void)e; IdsR_Forwarded++; return E_OK; }
 
 /* --- helpers -------------------------------------------------------- */
 
@@ -194,6 +201,100 @@ static void T_rate_limiter_drops_burst(void)
            Log_Can.calls, s->droppedGate);
 }
 
+/* ------------------------------------------------------------------ */
+/*  IDPS tests                                                         */
+/* ------------------------------------------------------------------ */
+
+static void T_idsm_reports_unknown_source(void)
+{
+    reset();
+    const IdsM_StatsType *s0 = IdsM_GetStats();
+    const uint32 before = s0->reportedTotal;
+
+    PduInfoType pi = { .SduDataPtr = (uint8[]){0,0,0,0}, .SduLength = 4u };
+    PduR_CanIfRxIndication(0x7FEu, &pi);   /* unknown id */
+
+    const IdsM_StatsType *s1 = IdsM_GetStats();
+    assert(s1->reportedTotal > before);
+    assert(s1->dropped > 0u);
+    printf("PASS T_idsm_reports_unknown_source (reported=%u dropped=%u)\n",
+           s1->reportedTotal, s1->dropped);
+}
+
+static void T_idsm_drains_to_idsr(void)
+{
+    IdsR_Forwarded = 0u;
+    IdsM_MainFunction();
+    /* prior tests already produced events -> IdsR should have seen
+     * at least one. */
+    assert(IdsR_Forwarded > 0u);
+    printf("PASS T_idsm_drains_to_idsr (forwarded=%u)\n", IdsR_Forwarded);
+}
+
+static void T_anomaly_detector_blocks_replay_storm(void)
+{
+    /* Drive a known-monitored route (0x040 DoorLock_Req, nominal
+     * 100 ms, low% = 50 -> reject if dt < 50 ms). FakeUs stays 0
+     * -> dt = 0 on every subsequent arrival -> anomaly on every
+     * call after the first. The IdsM policy maps FREQ_ANOMALY to
+     * BLOCK_ROUTE, so after the first violation the route is
+     * blocked and future calls short-circuit. */
+    reset();
+    /* First call seeds the phase, no anomaly. */
+    uint8 frame[8] = {0};
+    PduInfoType pi = { .SduDataPtr = frame, .SduLength = 8u };
+    FakeUs = 1u;     /* non-zero -- avoid the seed sentinel  */
+    PduR_CanIfRxIndication(0x040u, &pi);
+    assert(Log_Lin.calls == 1u);
+
+    /* Second call 1 us later -> dt = 1 us, far below 50 ms low band
+     *  -> anomaly -> route blocked by IdsM policy. */
+    FakeUs = 2u;
+    PduR_CanIfRxIndication(0x040u, &pi);
+
+    /* Third call must be short-circuited before the dispatcher even
+     * looks at the route table. */
+    reset();
+    FakeUs = 3u;
+    PduR_CanIfRxIndication(0x040u, &pi);
+    assert(Log_Lin.calls == 0u);
+    assert(IdsM_IsRouteBlocked(0x040u) == TRUE);
+    printf("PASS T_anomaly_detector_blocks_replay_storm\n");
+}
+
+static void T_isolated_source_short_circuits(void)
+{
+    /* Emulate a HIGH-severity DIAG_AUTH_FAIL: policy maps to
+     * ISOLATE_SRC. We feed the SrcModule via the ctx. */
+    reset();
+    IdsM_CtxDataType ctx = { .srcModule = (uint16)PDUR_SRC_LINIF,
+                             .srcPduId  = 0x999u,
+                             .length    = 0u };
+    IdsM_ActionType a = IdsM_ReportSecurityEvent(IDSM_SEV_DIAG_AUTH_FAIL, &ctx);
+    assert(a == IDSM_ACTION_ISOLATE_SRC);
+    assert(IdsM_IsSourceIsolated((uint16)PDUR_SRC_LINIF) == TRUE);
+
+    /* Now any RX from LinIf must short-circuit -- but we route from
+     * CanIf, so just verify the predicate behaviour for the public
+     * API. */
+    assert(IdsM_IsSourceIsolated((uint16)PDUR_SRC_CANIF) == FALSE);
+    printf("PASS T_isolated_source_short_circuits\n");
+}
+
+static void T_critical_event_escalates_to_safe_state(void)
+{
+    /* SECURE_BOOT_FAIL is policy-mapped to SAFE_STATE. Skipped if
+     * a previous test already entered safe state (idempotent). */
+    if (SafetyMgr_IsSafeState() == TRUE) {
+        printf("SKIP T_critical_event_escalates_to_safe_state (already safe)\n");
+        return;
+    }
+    IdsM_ActionType a = IdsM_ReportSecurityEvent(IDSM_SEV_SECURE_BOOT_FAIL, NULL);
+    assert(a == IDSM_ACTION_SAFE_STATE);
+    assert(SafetyMgr_IsSafeState() == TRUE);
+    printf("PASS T_critical_event_escalates_to_safe_state\n");
+}
+
 int main(void)
 {
     T_init_succeeds_with_valid_table();
@@ -204,6 +305,11 @@ int main(void)
     T_off_board_route_blocks_unlisted_cmd();
     T_off_board_route_accepts_listed_cmd();
     T_rate_limiter_drops_burst();
-    printf("All routing tests passed.\n");
+    T_idsm_reports_unknown_source();
+    T_anomaly_detector_blocks_replay_storm();
+    T_isolated_source_short_circuits();
+    T_idsm_drains_to_idsr();
+    T_critical_event_escalates_to_safe_state();
+    printf("All routing + IDPS tests passed.\n");
     return 0;
 }

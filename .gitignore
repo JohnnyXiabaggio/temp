@@ -1,0 +1,5 @@
+test/test_pdur_routing
+test/compute_crc
+*.o
+*.a
+*.d

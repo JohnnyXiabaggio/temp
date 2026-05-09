@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TGW PduR Routing Table (excerpt)
+  AUTOSAR Classic R21-11 schema
+  Safety: ASIL-B(D) with E2E end-to-end protection at sender/receiver.
+  This file is a design-time excerpt; the full ARXML is generated from
+  the system description by the configuration tool (e.g. DaVinci CFG).
+-->
+<AUTOSAR xmlns="http://autosar.org/schema/r4.0">
+  <AR-PACKAGES>
+    <AR-PACKAGE>
+      <SHORT-NAME>TGW_PduR_Cfg</SHORT-NAME>
+      <ELEMENTS>
+
+        <ECUC-MODULE-CONFIGURATION-VALUES>
+          <SHORT-NAME>PduR</SHORT-NAME>
+          <CONTAINERS>
+
+            <ECUC-CONTAINER-VALUE>
+              <SHORT-NAME>PduRGeneral</SHORT-NAME>
+              <PARAMETER-VALUES>
+                <ECUC-NUMERICAL-PARAM-VALUE>
+                  <DEFINITION-REF DEST="ECUC-BOOLEAN-PARAM-DEF">/AUTOSAR/EcucDefs/PduR/PduRGeneral/PduRDevErrorDetect</DEFINITION-REF>
+                  <VALUE>false</VALUE>
+                </ECUC-NUMERICAL-PARAM-VALUE>
+                <ECUC-NUMERICAL-PARAM-VALUE>
+                  <DEFINITION-REF DEST="ECUC-BOOLEAN-PARAM-DEF">/AUTOSAR/EcucDefs/PduR/PduRGeneral/PduRZeroCostOperation</DEFINITION-REF>
+                  <VALUE>false</VALUE>
+                </ECUC-NUMERICAL-PARAM-VALUE>
+                <ECUC-NUMERICAL-PARAM-VALUE>
+                  <DEFINITION-REF DEST="ECUC-BOOLEAN-PARAM-DEF">/AUTOSAR/EcucDefs/PduR/PduRGeneral/PduRMetaDataSupport</DEFINITION-REF>
+                  <VALUE>true</VALUE>
+                </ECUC-NUMERICAL-PARAM-VALUE>
+              </PARAMETER-VALUES>
+            </ECUC-CONTAINER-VALUE>
+
+            <!-- Route 0x0011 : EngineTrq_Cmd  CN0(CAN-FD) -> CN1(CAN-FD)  ASIL-D -->
+            <ECUC-CONTAINER-VALUE>
+              <SHORT-NAME>RP_EngineTrq_Cmd</SHORT-NAME>
+              <PARAMETER-VALUES>
+                <ECUC-TEXTUAL-PARAM-VALUE>
+                  <DEFINITION-REF DEST="ECUC-ENUMERATION-PARAM-DEF">/AUTOSAR/EcucDefs/PduR/PduRRoutingPath/PduRSrcModule</DEFINITION-REF>
+                  <VALUE>CAN_IF</VALUE>
+                </ECUC-TEXTUAL-PARAM-VALUE>
+                <ECUC-NUMERICAL-PARAM-VALUE>
+                  <DEFINITION-REF DEST="ECUC-INTEGER-PARAM-DEF">/AUTOSAR/EcucDefs/PduR/PduRRoutingPath/PduRSrcPduHandleId</DEFINITION-REF>
+                  <VALUE>0x11</VALUE>
+                </ECUC-NUMERICAL-PARAM-VALUE>
+                <ECUC-TEXTUAL-PARAM-VALUE>
+                  <DEFINITION-REF>/TGW/SafetyAttributes/AsilLevel</DEFINITION-REF>
+                  <VALUE>ASIL_D</VALUE>
+                </ECUC-TEXTUAL-PARAM-VALUE>
+                <ECUC-NUMERICAL-PARAM-VALUE>
+                  <DEFINITION-REF>/TGW/SafetyAttributes/LatencyBudgetUs</DEFINITION-REF>
+                  <VALUE>1000</VALUE>
+                </ECUC-NUMERICAL-PARAM-VALUE>
+                <ECUC-TEXTUAL-PARAM-VALUE>
+                  <DEFINITION-REF>/TGW/SafetyAttributes/E2EProfile</DEFINITION-REF>
+                  <VALUE>PROFILE_02</VALUE>
+                </ECUC-TEXTUAL-PARAM-VALUE>
+                <ECUC-TEXTUAL-PARAM-VALUE>
+                  <DEFINITION-REF>/TGW/SafetyAttributes/SecOC</DEFINITION-REF>
+                  <VALUE>ENABLED</VALUE>
+                </ECUC-TEXTUAL-PARAM-VALUE>
+              </PARAMETER-VALUES>
+              <SUB-CONTAINERS>
+                <ECUC-CONTAINER-VALUE>
+                  <SHORT-NAME>DestPdu_CN1</SHORT-NAME>
+                  <PARAMETER-VALUES>
+                    <ECUC-TEXTUAL-PARAM-VALUE>
+                      <DEFINITION-REF>/AUTOSAR/EcucDefs/PduR/PduRDestPdu/PduRDestModule</DEFINITION-REF>
+                      <VALUE>CAN_IF</VALUE>
+                    </ECUC-TEXTUAL-PARAM-VALUE>
+                    <ECUC-NUMERICAL-PARAM-VALUE>
+                      <DEFINITION-REF>/AUTOSAR/EcucDefs/PduR/PduRDestPdu/PduRDestPduHandleId</DEFINITION-REF>
+                      <VALUE>0x111</VALUE>
+                    </ECUC-NUMERICAL-PARAM-VALUE>
+                  </PARAMETER-VALUES>
+                </ECUC-CONTAINER-VALUE>
+              </SUB-CONTAINERS>
+            </ECUC-CONTAINER-VALUE>
+
+            <!-- Route 0x00A0 : Telematics_Cmd  WAN -> CN2 (gated, ASIL-B) -->
+            <ECUC-CONTAINER-VALUE>
+              <SHORT-NAME>RP_Telematics_Cmd_Gated</SHORT-NAME>
+              <PARAMETER-VALUES>
+                <ECUC-TEXTUAL-PARAM-VALUE>
+                  <DEFINITION-REF>/AUTOSAR/EcucDefs/PduR/PduRRoutingPath/PduRSrcModule</DEFINITION-REF>
+                  <VALUE>SO_AD</VALUE>
+                </ECUC-TEXTUAL-PARAM-VALUE>
+                <ECUC-NUMERICAL-PARAM-VALUE>
+                  <DEFINITION-REF>/AUTOSAR/EcucDefs/PduR/PduRRoutingPath/PduRSrcPduHandleId</DEFINITION-REF>
+                  <VALUE>0xA0</VALUE>
+                </ECUC-NUMERICAL-PARAM-VALUE>
+                <ECUC-TEXTUAL-PARAM-VALUE>
+                  <DEFINITION-REF>/TGW/SafetyAttributes/AsilLevel</DEFINITION-REF>
+                  <VALUE>ASIL_B</VALUE>
+                </ECUC-TEXTUAL-PARAM-VALUE>
+                <ECUC-TEXTUAL-PARAM-VALUE>
+                  <DEFINITION-REF>/TGW/SafetyAttributes/IngressGate</DEFINITION-REF>
+                  <VALUE>SECOC_AND_RATELIMIT_AND_ALLOWLIST</VALUE>
+                </ECUC-TEXTUAL-PARAM-VALUE>
+              </PARAMETER-VALUES>
+            </ECUC-CONTAINER-VALUE>
+
+          </CONTAINERS>
+        </ECUC-MODULE-CONFIGURATION-VALUES>
+
+      </ELEMENTS>
+    </AR-PACKAGE>
+  </AR-PACKAGES>
+</AUTOSAR>

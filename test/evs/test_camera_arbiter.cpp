@@ -1,168 +1,274 @@
-/* Host tests for the camera arbiter, covering the three worked scenarios
- * from Part 3 §3.3.3:
- *  A. DVR + preview coexist.
- *  B. RVC engaged while DVR recording — preempts DVR and preview.
- *  C. Surround + RVC on the rear camera.
+/* Unit tests for camera_arbiter. Cover all admission outcomes, every spec
+ * negotiation policy (Part 3 §3.3.5), preemption deadline handling, and
+ * the fallback-spec restoration on arbiter empty.
  */
 
-#include <cassert>
-#include <cstdio>
-#include <vector>
+#define TESTS_MAIN
+#include "tests.hpp"
 
 #include "../../src/EVS/ap/camera_arbiter.h"
 
 using namespace evs::ap;
 
-static int n_pass, n_fail;
-#define CHECK(cond) do { \
-    if (cond) { n_pass++; } \
-    else { std::fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #cond); n_fail++; } \
-} while (0)
-
-static CameraConfig rear_cfg()
-{
-    CameraConfig c;
-    c.camera_id  = "rear";
-    c.negotiation = SpecNegotiation::CommonHigh;
-    c.fallback_spec = StreamSpec{1280, 720, 30, /*pixfmt*/0x3231564eu, true, 4};
-    return c;
-}
-
-static StreamSpec spec_720p30()
-{
-    return StreamSpec{1280, 720, 30, 0x3231564eu, true, 4};
-}
-
-static StreamSpec spec_1080p30()
-{
-    return StreamSpec{1920, 1080, 30, 0x3231564eu, true, 4};
-}
+static StreamSpec spec_720p30()  { return {1280,  720, 30, 0x3231564eu, true, 4}; }
+static StreamSpec spec_1080p30() { return {1920, 1080, 30, 0x3231564eu, true, 4}; }
+static StreamSpec spec_720p60()  { return {1280,  720, 60, 0x3231564eu, true, 4}; }
 
 static ConsumerInfo dvr_loop()
-{
-    return ConsumerInfo{"dvr-managerd", 1001, Priority::DVR_LOOP, true, false};
-}
+    { return {"dvr-managerd", 1001, Priority::DVR_LOOP,  true,  false}; }
+static ConsumerInfo dvr_event()
+    { return {"dvr-managerd", 1001, Priority::DVR_EVENT, true,  false}; }
 static ConsumerInfo preview()
-{
-    return ConsumerInfo{"hmi", 1002, Priority::PREVIEW, true, false};
-}
+    { return {"hmi",          1002, Priority::PREVIEW,   true,  false}; }
 static ConsumerInfo rvc()
-{
-    return ConsumerInfo{"evs-managerd", 1003, Priority::RVC, false, true};
-}
+    { return {"evs-managerd", 1003, Priority::RVC,       false, true};  }
 static ConsumerInfo surround()
+    { return {"surround-viewd", 1004, Priority::SURROUND, true, false}; }
+static ConsumerInfo non_preempt_safety()
+    { return {"safety-tracker", 9, Priority::SURROUND,   false, false}; }
+
+struct Mocks {
+    std::vector<std::string> preempts;
+    std::vector<StreamSpec>  reprograms;
+    uint64_t                 fake_now = 0;
+    ArbiterDeps deps()
+    {
+        return {
+            [this](const std::string &n, uint64_t, const std::string &, uint32_t) {
+                preempts.push_back(n);
+            },
+            [this](const StreamSpec &s) { reprograms.push_back(s); return true; },
+            [this] { return fake_now; },
+        };
+    }
+};
+
+static CameraConfig rear(SpecNegotiation neg = SpecNegotiation::CommonHigh)
 {
-    return ConsumerInfo{"surround-viewd", 1004, Priority::SURROUND, true, false};
+    return {"rear", neg, spec_720p30()};
 }
 
-static ArbiterDeps simple_deps(std::vector<std::string> *preempt_log,
-                               std::vector<StreamSpec>  *reprog_log)
+/* ------------------------------------------------------------------ */
+/* Admission                                                           */
+/* ------------------------------------------------------------------ */
+
+TEST(empty_arbiter_admits_anything)
 {
-    ArbiterDeps d;
-    d.emit_preempted = [preempt_log](const std::string &name, uint64_t,
-                                     const std::string &, uint32_t) {
-        preempt_log->push_back(name);
-    };
-    d.reprogram_v4l2 = [reprog_log](const StreamSpec &s) {
-        reprog_log->push_back(s); return true;
-    };
-    d.now_ns = [] { return 0ULL; };
-    return d;
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    auto r = a.admit(spec_720p30(), preview());
+    CHECK_EQ(r.status, Admission::Admitted);
+    CHECK(r.to_preempt.empty());
 }
 
-static void scenario_a_concurrent_dvr_preview()
+TEST(two_non_exclusive_consumers_coexist)
 {
-    std::vector<std::string> p; std::vector<StreamSpec> r;
-    CameraArbiter arb(rear_cfg(), simple_deps(&p, &r));
-
-    auto a1 = arb.admit(spec_1080p30(), dvr_loop());
-    CHECK(a1.status == Admission::Admitted);
-    CHECK(a1.to_preempt.empty());
-    arb.activate(spec_1080p30(), dvr_loop());
-
-    auto a2 = arb.admit(spec_720p30(), preview());
-    CHECK(a2.status == Admission::Admitted);
-    CHECK(a2.to_preempt.empty());
-    arb.activate(spec_720p30(), preview());
-
-    /* CommonHigh keeps the V4L2 spec at 1080p30. */
-    CHECK(arb.activeV4L2Spec().width == 1920);
-    CHECK(arb.activeV4L2Spec().height == 1080);
-    CHECK(arb.snapshot().size() == 2);
-    CHECK(!arb.hasExclusiveHolder());
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.activate(spec_1080p30(), dvr_loop());
+    auto r = a.admit(spec_720p30(), preview());
+    CHECK_EQ(r.status, Admission::Admitted);
+    CHECK(r.to_preempt.empty());
 }
 
-static void scenario_b_rvc_preempts_dvr_and_preview()
+TEST(exclusive_admission_collects_all_lower_priority_streams)
 {
-    std::vector<std::string> p; std::vector<StreamSpec> r;
-    CameraArbiter arb(rear_cfg(), simple_deps(&p, &r));
-
-    arb.activate(spec_1080p30(), dvr_loop());
-    arb.activate(spec_720p30(),  preview());
-
-    auto a = arb.admit(spec_720p30(), rvc());
-    CHECK(a.status == Admission::Admitted);
-    CHECK(a.to_preempt.size() == 2);
-
-    /* Caller preempts in turn. */
-    for (uint64_t id : a.to_preempt) arb.preempt(id, "rvc engaged");
-    CHECK(p.size() == 2);
-
-    /* Consumers release. */
-    for (uint64_t id : a.to_preempt) arb.onConsumerReleased(id);
-    CHECK(arb.snapshot().empty());
-
-    arb.activate(spec_720p30(), rvc());
-    CHECK(arb.hasExclusiveHolder());
-
-    /* Now no second preview can take it. */
-    auto a2 = arb.admit(spec_720p30(), preview());
-    CHECK(a2.status == Admission::Rejected);
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.activate(spec_1080p30(), dvr_loop());
+    a.activate(spec_720p30(),  preview());
+    auto r = a.admit(spec_720p30(), rvc());
+    CHECK_EQ(r.status, Admission::Admitted);
+    CHECK_EQ(r.to_preempt.size(), 2u);
 }
 
-static void scenario_c_rvc_after_rvc_releases()
+TEST(exclusive_holder_repels_lower_priority_request)
 {
-    std::vector<std::string> p; std::vector<StreamSpec> r;
-    CameraArbiter arb(rear_cfg(), simple_deps(&p, &r));
-
-    arb.activate(spec_720p30(), rvc());
-    CHECK(arb.hasExclusiveHolder());
-
-    /* Surround tries to attach to rear cam — rejected (RVC holds exclusive
-     * with higher priority). */
-    auto a = arb.admit(spec_720p30(), surround());
-    CHECK(a.status == Admission::Rejected);
-
-    /* RVC releases. */
-    auto streams = arb.snapshot();
-    CHECK(streams.size() == 1);
-    arb.onConsumerReleased(streams[0].id);
-    CHECK(!arb.hasExclusiveHolder());
-
-    /* Now surround can attach. */
-    auto a2 = arb.admit(spec_720p30(), surround());
-    CHECK(a2.status == Admission::Admitted);
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.activate(spec_720p30(), rvc());
+    auto r = a.admit(spec_720p30(), preview());
+    CHECK_EQ(r.status, Admission::Rejected);
 }
 
-static void test_non_preemptable_rejection()
+TEST(equal_priority_against_exclusive_holder_rejected)
 {
-    std::vector<std::string> p; std::vector<StreamSpec> r;
-    CameraArbiter arb(rear_cfg(), simple_deps(&p, &r));
-
-    /* A non-preemptable, non-exclusive consumer at SURROUND priority. */
-    ConsumerInfo stubborn{"safety-tracker", 9, Priority::SURROUND, false, false};
-    arb.activate(spec_720p30(), stubborn);
-
-    auto a = arb.admit(spec_720p30(), rvc());
-    CHECK(a.status == Admission::Rejected);
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.activate(spec_720p30(), rvc());
+    auto r = a.admit(spec_720p30(), rvc());
+    CHECK_EQ(r.status, Admission::Rejected);
 }
 
-int main()
+TEST(non_preemptable_blocks_exclusive_request)
 {
-    scenario_a_concurrent_dvr_preview();
-    scenario_b_rvc_preempts_dvr_and_preview();
-    scenario_c_rvc_after_rvc_releases();
-    test_non_preemptable_rejection();
-    std::printf("camera_arbiter: %d pass, %d fail\n", n_pass, n_fail);
-    return n_fail == 0 ? 0 : 1;
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.activate(spec_720p30(), non_preempt_safety());
+    auto r = a.admit(spec_720p30(), rvc());
+    CHECK_EQ(r.status, Admission::Rejected);
 }
+
+/* DVR_EVENT (priority 25) outranks DVR_LOOP (30) but neither is exclusive.
+ * The arbiter should admit both side-by-side without preempting DVR_LOOP. */
+TEST(higher_non_exclusive_does_not_preempt_lower)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.activate(spec_1080p30(), dvr_loop());
+    auto r = a.admit(spec_1080p30(), dvr_event());
+    CHECK_EQ(r.status, Admission::Admitted);
+    CHECK(r.to_preempt.empty());
+}
+
+/* ------------------------------------------------------------------ */
+/* Preemption                                                          */
+/* ------------------------------------------------------------------ */
+
+TEST(preempt_emits_signal_and_marks_state)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    auto id = a.activate(spec_720p30(), dvr_loop());
+    a.preempt(id, "rvc engaged");
+    CHECK_EQ(m.preempts.size(), 1u);
+    CHECK_EQ(m.preempts[0], std::string("dvr-managerd"));
+}
+
+TEST(consumer_release_clears_stream_and_holder)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    auto id = a.activate(spec_720p30(), rvc());
+    CHECK(a.hasExclusiveHolder());
+    a.onConsumerReleased(id);
+    CHECK(!a.hasExclusiveHolder());
+    CHECK(a.snapshot().empty());
+}
+
+TEST(deadline_force_close_matches_graceful_release)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    auto id = a.activate(spec_720p30(), dvr_loop());
+    a.preempt(id, "rvc engaged");
+    a.onPreemptionDeadline(id);    /* consumer didn't yield in time */
+    CHECK(a.snapshot().empty());
+}
+
+TEST(release_unknown_id_is_a_noop)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.onConsumerReleased(0xdead);  /* must not crash */
+    CHECK(a.snapshot().empty());
+}
+
+/* ------------------------------------------------------------------ */
+/* Spec negotiation                                                    */
+/* ------------------------------------------------------------------ */
+
+TEST(commonhigh_lifts_active_spec_to_max)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.activate(spec_720p30(),  preview());
+    a.activate(spec_1080p30(), dvr_loop());
+    CHECK_EQ(a.activeV4L2Spec().width,  1920u);
+    CHECK_EQ(a.activeV4L2Spec().height, 1080u);
+}
+
+TEST(commonhigh_active_spec_falls_back_when_empty)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    auto id = a.activate(spec_1080p30(), dvr_loop());
+    a.onConsumerReleased(id);
+    /* Empty arbiter must reset to the configured fallback so the next
+     * admission isn't biased by the previous high-water mark. */
+    CHECK_EQ(a.activeV4L2Spec().width,  1280u);
+    CHECK_EQ(a.activeV4L2Spec().height,  720u);
+}
+
+TEST(commonhigh_does_not_thrash_on_intermediate_release)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.activate(spec_1080p30(), dvr_loop());
+    auto preview_id = a.activate(spec_720p30(), preview());
+    /* Release preview, dvr still at 1080p. */
+    a.onConsumerReleased(preview_id);
+    CHECK_EQ(a.activeV4L2Spec().width, 1920u);  /* unchanged */
+}
+
+TEST(strict_rejects_mismatched_spec)
+{
+    Mocks m; CameraArbiter a(rear(SpecNegotiation::Strict), m.deps());
+    a.activate(spec_720p30(), preview());
+    auto r = a.admit(spec_1080p30(), dvr_loop());
+    CHECK_EQ(r.status, Admission::Rejected);
+}
+
+TEST(strict_admits_matching_spec)
+{
+    Mocks m; CameraArbiter a(rear(SpecNegotiation::Strict), m.deps());
+    a.activate(spec_720p30(), preview());
+    auto r = a.admit(spec_720p30(), dvr_loop());
+    CHECK_EQ(r.status, Admission::Admitted);
+}
+
+TEST(sensorvc_admits_disjoint_specs)
+{
+    Mocks m; CameraArbiter a(rear(SpecNegotiation::SensorVc), m.deps());
+    a.activate(spec_720p30(),  preview());
+    a.activate(spec_1080p30(), dvr_loop());
+    auto r = a.admit(spec_720p60(), surround());
+    CHECK_EQ(r.status, Admission::Admitted);
+}
+
+/* ------------------------------------------------------------------ */
+/* Plumbing                                                            */
+/* ------------------------------------------------------------------ */
+
+TEST(reprogram_v4l2_invoked_with_active_spec)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.activate(spec_1080p30(), dvr_loop());
+    CHECK_EQ(m.reprograms.size(), 1u);
+    CHECK_EQ(m.reprograms[0].width,  1920u);
+    CHECK_EQ(m.reprograms[0].height, 1080u);
+}
+
+TEST(snapshot_returns_all_active_streams)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.activate(spec_720p30(),  preview());
+    a.activate(spec_1080p30(), dvr_loop());
+    auto v = a.snapshot();
+    CHECK_EQ(v.size(), 2u);
+    /* Each entry has consumer + spec populated. */
+    bool saw_dvr = false, saw_preview = false;
+    for (const auto &h : v) {
+        if (h.consumer.client_name == "dvr-managerd") saw_dvr = true;
+        if (h.consumer.client_name == "hmi")          saw_preview = true;
+    }
+    CHECK(saw_dvr);
+    CHECK(saw_preview);
+}
+
+/* End-to-end Scenario B from the reference doc, reproduced as a single
+ * integration check that exercises admission, preempt, release, and the
+ * exclusive transition. */
+TEST(scenario_b_rvc_engages_then_releases)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+
+    a.activate(spec_1080p30(), dvr_loop());
+    a.activate(spec_720p30(),  preview());
+
+    auto adm = a.admit(spec_720p30(), rvc());
+    CHECK_EQ(adm.status, Admission::Admitted);
+    CHECK_EQ(adm.to_preempt.size(), 2u);
+    for (auto id : adm.to_preempt) a.preempt(id, "rvc");
+    for (auto id : adm.to_preempt) a.onConsumerReleased(id);
+
+    a.activate(spec_720p30(), rvc());
+    CHECK(a.hasExclusiveHolder());
+
+    /* Gear back to D — release. */
+    auto streams = a.snapshot();
+    CHECK_EQ(streams.size(), 1u);
+    a.onConsumerReleased(streams[0].id);
+    CHECK(!a.hasExclusiveHolder());
+
+    /* Active V4L2 spec is now back to fallback (the camera went idle). */
+    CHECK_EQ(a.activeV4L2Spec().width, 1280u);
+}
+
+int main() { return tests::run_all(); }

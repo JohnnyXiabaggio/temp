@@ -14,3 +14,21 @@ protection).
 - `src/Security/` — IdsM, anomaly detector, IdsR off-board reporter
 - `src/OS/`       — OS-Application partitioning
 - `test/`         — host unit tests (`cd test && make run`)
+
+## EVS / Camera stack
+
+Implementation of the IVI EVS/DVR/Camera stack reference (cold-boot rear-view
+camera with MCU pre-Linux display, DRM atomic SHADOW→CUTOVER handover, and
+camera arbitration).
+
+- `src/EVS/common/handover_block.h` — shared MCU↔AP block layout
+- `src/EVS/mcu/`  — Zephyr-style MCU firmware: `csi_driver`, `disp_drv`,
+  `isp_lite`, `can_listen`, `ovl_render`, `handover_agent`, and pure FSM
+  in `evs_main.{c,h}`
+- `src/EVS/ap/`   — Linux AP side: `drm_atomic` (libdrm bindings, gated by
+  `EVS_HAVE_LIBDRM`), `cutover_planner` (pure handover sequencer),
+  `camera_arbiter` (admission, preemption, V4L2 spec negotiation),
+  `ap_handover_agent` (mmap of shared block)
+- `test/evs/`     — host tests (`cd test/evs && make run`): FSM transitions,
+  arbiter scenarios A/B/C, cutover planner happy/abort paths, handover
+  cross-side liveness

@@ -42,6 +42,13 @@ struct StreamSpec {
     uint32_t pixfmt = 0;
     bool     needs_dmabuf_export = true;
     uint32_t buffer_count = 4;
+    /* Set by latency-critical consumers (60 fps surround, mirror replacement,
+     * RVC at 60 Hz). Admission becomes exclusive against any non-low-latency
+     * consumer to keep the fast path uncontended; multiple low-latency
+     * consumers are only permitted when the camera uses SensorVc negotiation
+     * so each runs on its own hardware VC. See
+     * docs/EVS_LowLatency_Design.md §8. */
+    bool     low_latency = false;
 };
 
 enum class StreamState { Active, Paused, Preempted, Closing };

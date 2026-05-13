@@ -107,6 +107,37 @@ AdmissionResult CameraArbiter::admit(const StreamSpec &spec,
         }
     }
 
+    /* 4. Low-latency exclusivity. A low_latency consumer cannot share the
+     * camera with non-low-latency consumers (their drop-not-queue policy
+     * differs); two low_latency consumers can coexist only on SensorVc so
+     * each runs on its own hardware VC. Lower-priority existing consumers
+     * that block this rule are added to to_preempt — higher- or
+     * equal-priority blockers reject the admission. */
+    auto blocks_low_latency = [&](const StreamHandle &s) -> bool {
+        if (spec.low_latency && !s.spec.low_latency) return true;
+        if (!spec.low_latency && s.spec.low_latency) return true;
+        if (spec.low_latency && s.spec.low_latency &&
+            cfg_.negotiation != SpecNegotiation::SensorVc) return true;
+        return false;
+    };
+    for (const auto &[id, s] : streams_) {
+        if (!blocks_low_latency(s)) continue;
+        if (std::find(to_preempt.begin(), to_preempt.end(), id) !=
+            to_preempt.end()) continue;     /* already queued for preempt */
+        const auto p = static_cast<uint32_t>(s.consumer.priority);
+        if (p <= incoming_p) {
+            return {Admission::Rejected,
+                    "low-latency contract conflicts with existing consumer: " +
+                        s.consumer.client_name, {}};
+        }
+        if (!s.consumer.preemptable) {
+            return {Admission::Rejected,
+                    "non-preemptable consumer blocks low-latency: " +
+                        s.consumer.client_name, {}};
+        }
+        to_preempt.push_back(id);
+    }
+
     return {Admission::Admitted, {}, std::move(to_preempt)};
 }
 

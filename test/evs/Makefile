@@ -13,7 +13,8 @@ ALL_BINS = $(BIN_DIR)/test_evs_fsm \
            $(BIN_DIR)/test_camera_arbiter \
            $(BIN_DIR)/test_cutover_planner \
            $(BIN_DIR)/test_handover \
-           $(BIN_DIR)/test_handover_abi
+           $(BIN_DIR)/test_handover_abi \
+           $(BIN_DIR)/test_latency_telemetry
 
 .PHONY: all run clean
 all: $(ALL_BINS)
@@ -32,6 +33,9 @@ $(BIN_DIR)/test_cutover_planner: test_cutover_planner.cpp tests.hpp $(SRC_AP)/cu
 
 $(BIN_DIR)/test_handover_abi: test_handover_abi.cpp tests.hpp $(SRC_COM)/handover_block.h | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) -o $@ test_handover_abi.cpp
+
+$(BIN_DIR)/test_latency_telemetry: test_latency_telemetry.c $(SRC_COM)/latency_telemetry.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) -o $@ test_latency_telemetry.c
 
 $(BIN_DIR)/handover_agent.o: $(SRC_MCU)/handover_agent.c | $(BIN_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<

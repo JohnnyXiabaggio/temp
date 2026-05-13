@@ -271,4 +271,77 @@ TEST(scenario_b_rvc_engages_then_releases)
     CHECK_EQ(a.activeV4L2Spec().width, 1280u);
 }
 
+/* ------------------------------------------------------------------ */
+/* Low-latency admission contract (60 fps fast path)                   */
+/* ------------------------------------------------------------------ */
+
+static StreamSpec spec_720p60_ll()
+{
+    StreamSpec s {1280, 720, 60, 0x3231564eu, true, 3};
+    s.low_latency = true;
+    return s;
+}
+
+static ConsumerInfo surround_ll()
+{
+    /* Higher priority than DVR_LOOP so it can preempt; non-exclusive. */
+    return {"surround-ll", 2001, Priority::SURROUND, true, false};
+}
+
+TEST(low_latency_admits_into_empty_camera)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    auto r = a.admit(spec_720p60_ll(), surround_ll());
+    CHECK_EQ(r.status, Admission::Admitted);
+}
+
+TEST(low_latency_preempts_lower_priority_normal_consumer)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.activate(spec_720p30(), preview());          /* PREVIEW prio 40 */
+    auto r = a.admit(spec_720p60_ll(), surround_ll());  /* SURROUND 10 */
+    CHECK_EQ(r.status, Admission::Admitted);
+    CHECK_EQ(r.to_preempt.size(), 1u);
+}
+
+TEST(low_latency_rejected_when_higher_priority_normal_consumer_present)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    /* DVR_EVENT (25) outranks SURROUND (10) numerically? No — RVC=0,
+     * SURROUND=10, DVR_EVENT=25. SURROUND outranks DVR_EVENT. Use a
+     * consumer that actually outranks: an emergency low-prio number. */
+    ConsumerInfo emergency{"emergency", 7, Priority::RVC, false, false};
+    /* Force RVC-priority non-exclusive non-preemptable to block. */
+    a.activate(spec_720p30(), emergency);
+    auto r = a.admit(spec_720p60_ll(), surround_ll());
+    CHECK_EQ(r.status, Admission::Rejected);
+}
+
+TEST(normal_consumer_rejected_when_low_latency_active)
+{
+    Mocks m; CameraArbiter a(rear(), m.deps());
+    a.activate(spec_720p60_ll(), surround_ll());
+    auto r = a.admit(spec_720p30(), preview());
+    CHECK_EQ(r.status, Admission::Rejected);
+}
+
+TEST(two_low_latency_rejected_on_commonhigh_camera)
+{
+    Mocks m; CameraArbiter a(rear(SpecNegotiation::CommonHigh), m.deps());
+    a.activate(spec_720p60_ll(), surround_ll());
+    ConsumerInfo other_ll{"adas-ll", 2002, Priority::SURROUND, true, false};
+    auto r = a.admit(spec_720p60_ll(), other_ll);
+    /* SURROUND vs SURROUND — equal priority and contract conflict. */
+    CHECK_EQ(r.status, Admission::Rejected);
+}
+
+TEST(two_low_latency_admitted_on_sensorvc_camera)
+{
+    Mocks m; CameraArbiter a(rear(SpecNegotiation::SensorVc), m.deps());
+    a.activate(spec_720p60_ll(), surround_ll());
+    ConsumerInfo other_ll{"adas-ll", 2002, Priority::SURROUND, true, false};
+    auto r = a.admit(spec_720p60_ll(), other_ll);
+    CHECK_EQ(r.status, Admission::Admitted);
+}
+
 int main() { return tests::run_all(); }

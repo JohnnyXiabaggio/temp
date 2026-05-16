@@ -8,6 +8,7 @@ protection).
 - `docs/TGW_Routing_Design.md` — architecture and safety concept
 - `docs/TGW_Code_Design.md` — detailed code design (module map, control flow)
 - `docs/TGW_IDPS_Design.md` — cybersecurity / IDPS design (ISO 21434, UN R155)
+- `docs/TGW_AUTOSAR_Methodology_ASILB.md` — AUTOSAR design methodology for ASIL-B
 - `config/PduR_RoutingTable.arxml` — PduR routing table excerpt
 - `src/PduR/`     — routing dispatcher
 - `src/Safety/`   — SafetyMgr, SecOC gate, deadline monitor, E2E wrapper

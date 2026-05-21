@@ -274,6 +274,109 @@ static void T_cruise_skipped_when_part_is_hardwire(void)
     printf("PASS T_cruise_skipped_when_part_is_hardwire\n");
 }
 
+/* ------------------------------------------------------------------ *
+ *  Edge-case / robustness tests (spec YG-D18-2026-1042 Q&A + guard)
+ * ------------------------------------------------------------------ */
+
+/* Retarder gear values outside 0..5 must be clamped to gear-0 (off)
+ * so an out-of-spec LIN byte never commands unintended retarder torque. */
+static void T_retarder_out_of_range_gear_clamped_to_off(void)
+{
+    reset();
+    LinSig_HandleToVCU h = { .auxiliaryBrakeGear = 0x06u }; /* > spec max */
+    BodyRouting_OnLinHandleToVCU(&h);
+    tick_10ms();
+    assert(LastTSC1_VDR.requestedTorquePct          ==    0);
+    assert(LastTSC1_VDR.overrideControlMode         == 0x0u); /* disabled */
+    assert(LastTSC1_VDR.overrideControlModePriority == 0x3u);
+    assert(LastTSC1_VDR.checksum                    == 0xFFu);
+    printf("PASS T_retarder_out_of_range_gear_clamped_to_off\n");
+}
+
+/* When both the ON switch and the OFF switch rise on the same LIN frame,
+ * the gateway must output Disabled (OFF wins) -- safer of the two. */
+static void T_cruise_simultaneous_on_off_off_wins(void)
+{
+    reset();
+    LinSig_MSWToVCU s = {0};
+    BodyRouting_OnLinMSWToVCU(&s);
+    tick_10ms();
+
+    s.ccAccModeSwitch = 0x1u;
+    s.offSwitch       = 0x1u;
+    BodyRouting_OnLinMSWToVCU(&s);
+    tick_10ms();
+    assert(LastCCVS.cruiseControlEnableSwitch == 0x00u); /* Disabled wins */
+
+    /* Single-shot: back to Not Available the next cycle. */
+    BodyRouting_OnLinMSWToVCU(&s);
+    tick_10ms();
+    assert(LastCCVS.cruiseControlEnableSwitch == 0x03u);
+    printf("PASS T_cruise_simultaneous_on_off_off_wins\n");
+}
+
+/* Spec page 1: SET- is triggered by Scroll down = 0x1 OR 0x2.
+ * 0x1 is already exercised by T_cruise_set_plus_minus_resume_passthrough;
+ * verify 0x2 maps correctly to coast and clears on release. */
+static void T_cruise_scroll_down_0x2_maps_coast(void)
+{
+    reset();
+    LinSig_MSWToVCU s = {0};
+    BodyRouting_OnLinMSWToVCU(&s);
+    tick_10ms();
+
+    s.scrollDownButtonStatus = 0x2u;
+    BodyRouting_OnLinMSWToVCU(&s);
+    tick_10ms();
+    assert(LastCCVS.cruiseControlCoastSwitch == 1u);
+
+    s.scrollDownButtonStatus = 0x0u;
+    BodyRouting_OnLinMSWToVCU(&s);
+    tick_10ms();
+    assert(LastCCVS.cruiseControlCoastSwitch == 0u);
+    printf("PASS T_cruise_scroll_down_0x2_maps_coast\n");
+}
+
+/* A NULL pointer to OnLinMSWToVCU must be silently ignored (no crash,
+ * no stale update).  The CAN output stays at Not Available. */
+static void T_null_lin_msw_input_is_silently_ignored(void)
+{
+    reset();
+    BodyRouting_OnLinMSWToVCU(NULL);
+    tick_10ms();
+    assert(LastCCVS.cruiseControlEnableSwitch == 0x03u);
+    printf("PASS T_null_lin_msw_input_is_silently_ignored\n");
+}
+
+/* Verify that BodyRouting_GetStats() counts Enable and Disable pulses
+ * independently, matching the number of rising-edge events sent. */
+static void T_stats_cruise_pulses_counted(void)
+{
+    reset();
+    LinSig_MSWToVCU s = {0};
+    BodyRouting_OnLinMSWToVCU(&s);
+    tick_10ms();
+
+    /* One Enable pulse. */
+    s.ccAccModeSwitch = 0x1u;
+    BodyRouting_OnLinMSWToVCU(&s);
+    tick_10ms();
+
+    /* Release, then one Disable pulse. */
+    s.ccAccModeSwitch = 0x0u;
+    BodyRouting_OnLinMSWToVCU(&s);
+    tick_10ms();
+
+    s.offSwitch = 0x1u;
+    BodyRouting_OnLinMSWToVCU(&s);
+    tick_10ms();
+
+    const BodyRouting_StatsType *st = BodyRouting_GetStats();
+    assert(st->cruisePulsesEnable  == 1u);
+    assert(st->cruisePulsesDisable == 1u);
+    printf("PASS T_stats_cruise_pulses_counted\n");
+}
+
 /* ------------------------------------------------------------------ */
 
 int main(void)
@@ -288,6 +391,11 @@ int main(void)
     T_amt_passthrough();
     T_amt_disabled_on_mt_vehicle();
     T_cruise_skipped_when_part_is_hardwire();
+    T_retarder_out_of_range_gear_clamped_to_off();
+    T_cruise_simultaneous_on_off_off_wins();
+    T_cruise_scroll_down_0x2_maps_coast();
+    T_null_lin_msw_input_is_silently_ignored();
+    T_stats_cruise_pulses_counted();
     printf("All LIN/CAN routing tests passed.\n");
     return 0;
 }

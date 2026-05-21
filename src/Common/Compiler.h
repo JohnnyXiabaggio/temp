@@ -21,4 +21,14 @@
 #define SAFETY_CODE
 #define SECOC_CODE
 
+/* BodyRouting memory classes. */
+#define BODYROUTING_CODE
+#define BODYROUTING_VAR
+#define BODYROUTING_CONST
+#define BODYROUTING_APPL_DATA
+
+/* Pointer memory-class keyword used as second argument to P2VAR /
+ * P2CONST when the pointer itself has no special placement. */
+#define AUTOMATIC
+
 #endif

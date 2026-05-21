@@ -9,7 +9,7 @@
 #include "PartConfig.h"
 
 /* ------------------------------------------------------------------ *
- *  Mock OS clock and Com transmitters
+ *  Mock OS clock and Com transmitters                                  *
  * ------------------------------------------------------------------ */
 
 static uint32 FakeMs;
@@ -22,12 +22,30 @@ static CanSig_TSC1_VDR  LastTSC1_DR;
 static CanSig_TC1       LastTC1;
 static uint32 SentCcvs, SentTscVdr, SentTscDr, SentTc1;
 
-void Com_Send_CCVS_VCU(const CanSig_CCVS_VCU *s) { LastCCVS = *s;    SentCcvs++;   }
-void Com_Send_TSC1_VDR(const CanSig_TSC1_VDR *s) { LastTSC1_VDR = *s;SentTscVdr++; }
-void Com_Send_TSC1_DR (const CanSig_TSC1_VDR *s) { LastTSC1_DR  = *s;SentTscDr++;  }
-void Com_Send_TC1     (const CanSig_TC1      *s) { LastTC1 = *s;     SentTc1++;    }
+void Com_Send_CCVS_VCU(const CanSig_CCVS_VCU *s) { LastCCVS     = *s; SentCcvs++;   }
+void Com_Send_TSC1_VDR(const CanSig_TSC1_VDR *s) { LastTSC1_VDR = *s; SentTscVdr++; }
+void Com_Send_TSC1_DR (const CanSig_TSC1_VDR *s) { LastTSC1_DR  = *s; SentTscDr++;  }
+void Com_Send_TC1     (const CanSig_TC1      *s) { LastTC1      = *s; SentTc1++;    }
 
-/* Dem stub (BodyRouting compiles standalone). */
+/* ------------------------------------------------------------------ *
+ *  AUTOSAR BSW stubs required by BodyRouting                           *
+ * ------------------------------------------------------------------ */
+
+/* DET stub: record call counts so tests can verify DET is triggered. */
+#include "Det.h"
+static uint32 DetCallCount;
+Std_ReturnType Det_ReportError(
+    Det_ModuleIdType   ModuleId,
+    Det_InstanceIdType InstanceId,
+    Det_ApiIdType      ApiId,
+    Det_ErrorIdType    ErrorId)
+{
+    (void)ModuleId; (void)InstanceId; (void)ApiId; (void)ErrorId;
+    DetCallCount++;
+    return E_OK;
+}
+
+/* DEM stub (unchanged from original; used by E2E_Wrapper). */
 #include "Dem.h"
 Std_ReturnType Dem_ReportErrorStatus(Dem_EventIdType id, Dem_EventStatusType st)
 { (void)id; (void)st; return E_OK; }
@@ -40,12 +58,13 @@ static void reset(void)
 {
     BodyRouting_Init();
     PartConfig_Load();
-    FakeMs = 0u;
+    FakeMs       = 0u;
+    DetCallCount = 0u;
     SentCcvs = SentTscVdr = SentTscDr = SentTc1 = 0u;
-    memset(&LastCCVS, 0, sizeof LastCCVS);
+    memset(&LastCCVS,     0, sizeof LastCCVS);
     memset(&LastTSC1_VDR, 0, sizeof LastTSC1_VDR);
-    memset(&LastTSC1_DR, 0, sizeof LastTSC1_DR);
-    memset(&LastTC1, 0, sizeof LastTC1);
+    memset(&LastTSC1_DR,  0, sizeof LastTSC1_DR);
+    memset(&LastTC1,      0, sizeof LastTC1);
 }
 
 static void tick_10ms(void) { FakeMs += 10u; BodyRouting_MainFunction(); }
@@ -275,6 +294,38 @@ static void T_cruise_skipped_when_part_is_hardwire(void)
 }
 
 /* ------------------------------------------------------------------ *
+ *  AUTOSAR DET path tests                                              *
+ * ------------------------------------------------------------------ */
+
+/* Calling any API before Init must trigger exactly one DET error. */
+static void T_det_reported_when_module_uninit(void)
+{
+    /* Force uninitialised state by calling Init then re-examining a
+     * fresh instance — achieved by directly calling the API on a
+     * just-linked binary whose static state was not yet initialised.
+     * For the test, we call MainFunction before the first Init(). */
+    uint32 prevDet = DetCallCount;
+    BodyRouting_MainFunction();   /* ModuleState == 0 == UNINIT after link */
+    assert(DetCallCount > prevDet);
+    /* Re-initialise so subsequent tests see a clean state. */
+    (void)BodyRouting_Init();
+    printf("PASS T_det_reported_when_module_uninit\n");
+}
+
+/* NULL pointer to OnLinMSWToVCU must trigger DET, not crash. */
+static void T_det_reported_on_null_msw_ptr(void)
+{
+    reset();
+    DetCallCount = 0u;
+    BodyRouting_OnLinMSWToVCU(NULL_PTR);
+    assert(DetCallCount == 1u);
+    /* CAN output stays at Not Available — no stale update occurred. */
+    tick_10ms();
+    assert(LastCCVS.cruiseControlEnableSwitch == 0x03u);
+    printf("PASS T_det_reported_on_null_msw_ptr\n");
+}
+
+/* ------------------------------------------------------------------ *
  *  Edge-case / robustness tests (spec YG-D18-2026-1042 Q&A + guard)
  * ------------------------------------------------------------------ */
 
@@ -337,12 +388,13 @@ static void T_cruise_scroll_down_0x2_maps_coast(void)
     printf("PASS T_cruise_scroll_down_0x2_maps_coast\n");
 }
 
-/* A NULL pointer to OnLinMSWToVCU must be silently ignored (no crash,
- * no stale update).  The CAN output stays at Not Available. */
+/* NULL pointer to OnLinMSWToVCU must trigger DET and leave CAN at
+ * Not Available (covered thoroughly by T_det_reported_on_null_msw_ptr;
+ * retained here for the named-test count in the original test plan). */
 static void T_null_lin_msw_input_is_silently_ignored(void)
 {
     reset();
-    BodyRouting_OnLinMSWToVCU(NULL);
+    BodyRouting_OnLinMSWToVCU(NULL_PTR);
     tick_10ms();
     assert(LastCCVS.cruiseControlEnableSwitch == 0x03u);
     printf("PASS T_null_lin_msw_input_is_silently_ignored\n");
@@ -381,6 +433,8 @@ static void T_stats_cruise_pulses_counted(void)
 
 int main(void)
 {
+    T_det_reported_when_module_uninit();
+    T_det_reported_on_null_msw_ptr();
     T_cruise_default_is_not_available();
     T_cruise_on_press_emits_one_enabled_pulse();
     T_cruise_off_press_emits_one_disabled_pulse();

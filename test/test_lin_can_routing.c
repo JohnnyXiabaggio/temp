@@ -1,4 +1,5 @@
-/* Verifies the YG-D18-2026-1042 LIN <-> CAN routing tables. */
+/* Verifies the YG-D18-2026-1042 LIN <-> CAN routing tables,
+ * NuttX OS integration, and ISO 26262 ASIL-B safety mechanisms.      */
 
 #include <assert.h>
 #include <stdio.h>
@@ -7,9 +8,11 @@
 #include "Std_Types.h"
 #include "BodyRouting.h"
 #include "PartConfig.h"
+#include "BR_FuncSafety.h"
 
 /* ------------------------------------------------------------------ *
- *  Mock OS clock and Com transmitters                                  *
+ *  OsTime seam — weak symbols in NuttX_Os.c are overridden here so   *
+ *  time-dependent tests (staleness, supervision) stay deterministic.  *
  * ------------------------------------------------------------------ */
 
 static uint32 FakeMs;
@@ -429,6 +432,163 @@ static void T_stats_cruise_pulses_counted(void)
     printf("PASS T_stats_cruise_pulses_counted\n");
 }
 
+/* ================================================================== *
+ *  ISO 26262 ASIL-B functional safety tests                           *
+ * ================================================================== */
+
+/* Helper: one MainFunction tick followed by one supervision step. */
+static void task_step(void)
+{
+    FakeMs += 10u;
+    BodyRouting_MainFunction();
+    BR_FuncSafety_SupervisionStep();
+}
+
+/* SM-003: out-of-range LIN MSWToVCU frame is discarded; the last
+ * valid snapshot is retained and used in the next routing cycle.     */
+static void T_safety_msw_out_of_range_is_discarded(void)
+{
+    LinSig_MSWToVCU good;
+    LinSig_MSWToVCU bad;
+
+    reset();
+
+    /* Establish a valid snapshot: SET+ pressed. */
+    good.ccAccModeSwitch           = 0u;
+    good.scrollUpButtonStatus      = 0x1u;
+    good.scrollDownButtonStatus    = 0u;
+    good.cruiseControlResumeSwitch = 0u;
+    good.offSwitch                 = 0u;
+    good.valid                     = 1u;
+    BodyRouting_OnLinMSWToVCU(&good);
+    tick_10ms();
+    assert(LastCCVS.cruiseControlAccelerateSwitch == 1u);
+
+    /* Send a frame with ccAccModeSwitch > 0x3 — must be discarded. */
+    bad = good;
+    bad.ccAccModeSwitch = 0xFFu;          /* out of 2-bit range */
+    BodyRouting_OnLinMSWToVCU(&bad);
+    tick_10ms();
+    /* Output must still be from the last valid snapshot. */
+    assert(LastCCVS.cruiseControlAccelerateSwitch == 1u);
+    printf("PASS T_safety_msw_out_of_range_is_discarded\n");
+}
+
+/* SM-003: out-of-range LIN HandleToVCU frame is discarded.          */
+static void T_safety_handle_out_of_range_is_discarded(void)
+{
+    LinSig_HandleToVCU good;
+    LinSig_HandleToVCU bad;
+
+    reset();
+
+    /* Valid snapshot: gear 2 → -25 % torque. */
+    good.auxiliaryBrakeGear        = 2u;
+    good.transmissionRequestedGear = 0u;
+    good.transmissionMode1         = 0u;
+    good.amModeSwitch              = 0u;
+    good.mPlusSwitch               = 0u;
+    good.mMinusSwitch              = 0u;
+    good.valid                     = 1u;
+    BodyRouting_OnLinHandleToVCU(&good);
+    tick_10ms();
+    assert(LastTSC1_VDR.requestedTorquePct == (sint8)-25);
+
+    /* Out-of-range gear (> 5) must be discarded. */
+    bad = good;
+    bad.auxiliaryBrakeGear = 0x0Fu;
+    BodyRouting_OnLinHandleToVCU(&bad);
+    tick_10ms();
+    assert(LastTSC1_VDR.requestedTorquePct == (sint8)-25); /* unchanged */
+    printf("PASS T_safety_handle_out_of_range_is_discarded\n");
+}
+
+/* SM-004: BR_FuncSafety_CheckOutput_CCVS rejects the reserved 0x02
+ * value and accepts the three defined values (0x00, 0x01, 0x03).    */
+static void T_safety_ccvs_output_plausibility_api(void)
+{
+    CanSig_CCVS_VCU sig;
+
+    /* 0x02 is not defined in J1939 / spec — must be rejected. */
+    sig.cruiseControlEnableSwitch     = 0x02u;
+    sig.cruiseControlAccelerateSwitch = 0u;
+    sig.cruiseControlCoastSwitch      = 0u;
+    sig.cruiseControlResumeSwitch     = 0u;
+    assert(BR_FuncSafety_CheckOutput_CCVS(&sig) == FALSE);
+
+    /* All three defined values must be accepted. */
+    sig.cruiseControlEnableSwitch = BODYROUTING_CC_ENABLE_DISABLED;
+    assert(BR_FuncSafety_CheckOutput_CCVS(&sig) == TRUE);
+    sig.cruiseControlEnableSwitch = BODYROUTING_CC_ENABLE_ENABLED;
+    assert(BR_FuncSafety_CheckOutput_CCVS(&sig) == TRUE);
+    sig.cruiseControlEnableSwitch = BODYROUTING_CC_ENABLE_NOT_AVAILABLE;
+    assert(BR_FuncSafety_CheckOutput_CCVS(&sig) == TRUE);
+
+    /* Positive torque on CCVS (not applicable here) — check sub-bits. */
+    sig.cruiseControlAccelerateSwitch = 2u;   /* > 1 bit */
+    assert(BR_FuncSafety_CheckOutput_CCVS(&sig) == FALSE);
+    printf("PASS T_safety_ccvs_output_plausibility_api\n");
+}
+
+/* SM-001: the alive counter advances by ≥ 1 between supervision
+ * steps when MainFunction is running normally.                        */
+static void T_safety_alive_counter_advances_per_cycle(void)
+{
+    reset();
+    /* task_step: one MainFunction + one SupervisionStep.
+     * After the step, FaultLatched must still be FALSE.              */
+    task_step();
+    assert(BR_FuncSafety_IsFaultLatched() == FALSE);
+
+    /* Run three more steps — counter should keep advancing. */
+    task_step();
+    task_step();
+    task_step();
+    assert(BR_FuncSafety_IsFaultLatched() == FALSE);
+    printf("PASS T_safety_alive_counter_advances_per_cycle\n");
+}
+
+/* SM-006: once a fault is latched, BodyRouting_MainFunction sends
+ * safe-state defaults on every active CAN path, regardless of what
+ * LIN data was last received.                                         */
+static void T_safety_latched_fault_sends_safe_outputs(void)
+{
+    LinSig_MSWToVCU msw;
+
+    reset();
+
+    /* Inject valid LIN data that would normally produce Enabled pulse. */
+    msw.ccAccModeSwitch           = 0x1u;
+    msw.scrollUpButtonStatus      = 0x1u;
+    msw.scrollDownButtonStatus    = 0u;
+    msw.cruiseControlResumeSwitch = 0u;
+    msw.offSwitch                 = 0u;
+    msw.valid                     = 1u;
+    BodyRouting_OnLinMSWToVCU(&msw);
+
+    /* Force a latched fault by reporting BR_FS_ERROR_THRESHOLD errors. */
+    BR_FuncSafety_ReportFault(BR_FS_FAULT_ALIVE);
+    BR_FuncSafety_ReportFault(BR_FS_FAULT_ALIVE);
+    BR_FuncSafety_ReportFault(BR_FS_FAULT_ALIVE);
+    assert(BR_FuncSafety_IsFaultLatched() == TRUE);
+
+    /* MainFunction must output safe-state values on all paths. */
+    tick_10ms();
+
+    /* CCVS: cruise must be Not Available (0x03), not Enabled (0x01). */
+    assert(LastCCVS.cruiseControlEnableSwitch     == BODYROUTING_CC_ENABLE_NOT_AVAILABLE);
+    assert(LastCCVS.cruiseControlAccelerateSwitch == 0u);
+
+    /* TSC1_VDR: override must be disabled, torque must be 0 %. */
+    assert(LastTSC1_VDR.overrideControlMode   == BODYROUTING_OVERRIDE_DISABLED);
+    assert(LastTSC1_VDR.requestedTorquePct    == (sint8)0);
+
+    /* TC1: all zeros. */
+    assert(LastTC1.transmissionRequestedGear  == 0u);
+
+    printf("PASS T_safety_latched_fault_sends_safe_outputs\n");
+}
+
 /* ------------------------------------------------------------------ */
 
 int main(void)
@@ -450,6 +610,12 @@ int main(void)
     T_cruise_scroll_down_0x2_maps_coast();
     T_null_lin_msw_input_is_silently_ignored();
     T_stats_cruise_pulses_counted();
-    printf("All LIN/CAN routing tests passed.\n");
+    /* --- ISO 26262 ASIL-B safety tests ----------------------------- */
+    T_safety_msw_out_of_range_is_discarded();
+    T_safety_handle_out_of_range_is_discarded();
+    T_safety_ccvs_output_plausibility_api();
+    T_safety_alive_counter_advances_per_cycle();
+    T_safety_latched_fault_sends_safe_outputs();
+    printf("All LIN/CAN routing + NuttX/safety tests passed.\n");
     return 0;
 }

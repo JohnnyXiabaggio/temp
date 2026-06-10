@@ -12,15 +12,24 @@ SRC = ../src/PduR/PduR.c ../src/PduR/PduR_Cfg.c \
 LIN_SRC = ../src/App/BodyRouting.c ../src/App/PartConfig.c \
           test_lin_can_routing.c
 
+CODEC_SRC = ../src/App/BodyRouting.c ../src/App/PartConfig.c \
+            ../src/App/LinPack.c ../src/App/CanPack.c \
+            ../src/App/BodyRouting_Com.c \
+            test_codec.c
+
 test_pdur_routing: $(SRC)
 	$(CC) $(CFLAGS) -o $@ $(SRC)
 
 test_lin_can_routing: $(LIN_SRC)
 	$(CC) $(CFLAGS) -o $@ $(LIN_SRC)
 
-run: test_pdur_routing test_lin_can_routing
+test_codec: $(CODEC_SRC)
+	$(CC) $(CFLAGS) -o $@ $(CODEC_SRC)
+
+run: test_pdur_routing test_lin_can_routing test_codec
 	./test_pdur_routing
 	./test_lin_can_routing
+	./test_codec
 
 clean:
-	rm -f test_pdur_routing test_lin_can_routing
+	rm -f test_pdur_routing test_lin_can_routing test_codec

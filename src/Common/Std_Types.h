@@ -29,4 +29,13 @@ typedef struct {
     uint8        *MetaDataPtr;
 } PduInfoType;
 
+/* AUTOSAR null-pointer constant (MISRA C:2012 Rule 11.9 compliant). */
+#ifndef NULL_PTR
+#define NULL_PTR ((void *)0)
+#endif
+
+/* AUTOSAR activation switches used in Cfg headers. */
+#define STD_ON  (1u)
+#define STD_OFF (0u)
+
 #endif

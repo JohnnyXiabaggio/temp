@@ -1,52 +1,50 @@
-#ifndef BODY_ROUTING_H
-#define BODY_ROUTING_H
+/* BodyRouting — body-domain LIN <-> CAN routing SW-C.
+ * AUTOSAR Classic R4.3.1 BSW module header.
+ * Spec: YG-D18-2026-1042, J107 & J169 T-Gateway, 2026-04-22.
+ *
+ * Routing paths:
+ *   Cruise   : LIN MSWToVCU  (0x02) -> CAN CCVS_VCU (SA 0x05) -> EMS
+ *   Retarder : LIN HandleToVCU(0x01) -> CAN TSC1_VDR (SA 0x27) -> RCU
+ *   AMT shift: LIN HandleToVCU(0x01) -> CAN TC1      (SA 0x05) -> TCU */
+
+#ifndef BODYROUTING_H
+#define BODYROUTING_H
 
 #include "Std_Types.h"
+#include "Compiler.h"
 #include "LinSignals.h"
 #include "CanSignals.h"
+#include "BodyRouting_Types.h"
+#include "BodyRouting_Cfg.h"
 
 /* ------------------------------------------------------------------ *
- *  Body-domain LIN <-> CAN routing manager.
- *
- *  Implements the three routings agreed in YG-D18-2026-1042:
- *
- *    Cruise         LIN MSWToVCU (0x02)   -> CAN CCVS_VCU  (SA 0x05) -> EMS
- *    Retarder brake LIN HandleToVCU(0x01) -> CAN TSC1_VDR  (SA 0x27) -> RCU
- *    AMT shift      LIN HandleToVCU(0x01) -> CAN TC1       (SA 0x05) -> TCU
- *
- *  This module is *signal-level* routing, performed on top of PduR
- *  by an application SW-C (not pure PduR pass-through). Reasons:
- *
- *    - cruise has a state machine (single-shot Enable/Disable pulse)
- *    - retarder gear -> J1939 torque% needs a mapping table
- *    - 102A part-config discriminates the routing at runtime
- *    - the CAN frame is shared with other sources, so we use Com to
- *      pack only the signals we own
- *
- *  Pure PDU pass-through stays in PduR; the signal transforms live
- *  here in the ASIL partition next to PduR. The module is exercised
- *  cyclically (10 ms) from a TimingEvent runnable.
+ *  Public API                                                          *
  * ------------------------------------------------------------------ */
 
-extern Std_ReturnType BodyRouting_Init(void);
+/* Initialise module state.  Must be called before any other API.
+ * Returns E_OK unconditionally; retained for AUTOSAR Init pattern. */
+FUNC(Std_ReturnType, BODYROUTING_CODE)
+BodyRouting_Init(void);
 
-/* Called when a LIN RX indication delivers the named PDU. */
-extern void BodyRouting_OnLinMSWToVCU  (const LinSig_MSWToVCU   *sig);
-extern void BodyRouting_OnLinHandleToVCU(const LinSig_HandleToVCU *sig);
+/* LinIf RX-indication callbacks — called by PduR/LinIf on frame receipt. */
+FUNC(void, BODYROUTING_CODE)
+BodyRouting_OnLinMSWToVCU(
+    P2CONST(LinSig_MSWToVCU, AUTOMATIC, BODYROUTING_APPL_DATA) sig);
 
-/* Cyclic step: applies state machines, freshness checks, and
- * triggers Com signal updates. Called every 10 ms by the SchM. */
-extern void BodyRouting_MainFunction(void);
+FUNC(void, BODYROUTING_CODE)
+BodyRouting_OnLinHandleToVCU(
+    P2CONST(LinSig_HandleToVCU, AUTOMATIC, BODYROUTING_APPL_DATA) sig);
 
-/* Counters for diagnostics / unit tests. */
-typedef struct {
-    uint32 cruisePulsesEnable;
-    uint32 cruisePulsesDisable;
-    uint32 retarderUpdates;
-    uint32 amtUpdates;
-    uint32 staleLinDrops;       /* LIN went stale; CAN held at "Not Avail" */
-} BodyRouting_StatsType;
+/* Cyclic runnable — registered with SchM at 10 ms period.
+ * Applies state machines, staleness checks, and triggers Com signal
+ * updates for all three routing paths. */
+FUNC(void, BODYROUTING_CODE)
+BodyRouting_MainFunction(void);
 
-extern const BodyRouting_StatsType *BodyRouting_GetStats(void);
+/* Diagnostic counter access (read-only pointer into module RAM).
+ * Returns NULL_PTR and reports DET if module is not initialised. */
+FUNC(P2CONST(BodyRouting_StatsType, AUTOMATIC, BODYROUTING_APPL_DATA),
+     BODYROUTING_CODE)
+BodyRouting_GetStats(void);
 
 #endif
